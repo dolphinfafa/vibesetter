@@ -1,0 +1,53 @@
+[package]
+name = "vibesetter"
+version = "0.1.0"
+description = "A personal real-time vibe assistant"
+edition = "2021"
+rust-version = "1.90"
+
+[lib]
+name = "vibesetter_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "vibesetter"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:cpal", "dep:rubato"]
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true, features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+flate2 = "1"
+base64 = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+webrtc-vad = "0.4"
+tauri = { version = "2", optional = true, features = [] }
+cpal = { version = "0.18.2", optional = true }
+rubato = { version = "0.16", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wasapi = "0.22"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true

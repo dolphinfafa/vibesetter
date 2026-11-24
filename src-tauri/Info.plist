@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>NSMicrophoneUsageDescription</key><string>Vibesetter 需要使用你选择的麦克风，为助手提供实时对话内容。</string>
+  <key>NSScreenCaptureUsageDescription</key><string>Vibesetter 仅采集电脑音频，用于实时转写与助手回应，不保存屏幕画面。</string>
+</dict></plist>
