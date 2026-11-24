@@ -27,9 +27,10 @@ flowchart LR
 - 同时一个会话，状态为 stopped / listening / thinking / speaking。输入至少一种，输出至少一种，音频设备不能重复选择。
 - 输入包括多个麦克风、一路系统音频和文字；输出设备收到同一份语音，文字与语音共享回复。
 - 确定转写按时间入库；非确定转写仅实时显示。来源标签表示设备，不承诺说话人分离。
-- 音频停顿 1.2 秒后尝试自动回应，自动请求间隔至少 4 秒；模型按提示词判断是否值得回应。手动提交立即触发。
+- 会话默认自动判断。仅文字输出收到新的完整转写即可判断，不要求讲话停顿；包含语音输出（含文字 + 语音）时等待约 1.2 秒停顿，文字和语音共享回复。自动请求间隔至少 4 秒，模型按提示词判断是否值得回应；手动提交或“回应一次”立即触发。
+- 文字建议生成期间继续收集新转写，不因人声取消；新增内容在当前请求结束后按间隔继续判断，每次至多一个有效生成任务。模型决定不回应或请求失败后，不针对相同内容自动重试；出现新完整转写后再判断。
 - 最近 40 条、最多 24,000 字的会话内容提供上下文，超出后舍弃最旧内容。提示词保留，不进行摘要请求。
-- 有效人声持续约 400 ms 可取消当前回复；generation 标识拦截迟到结果。立即停止也取消生成、合成和播放缓冲。
+- 包含语音输出时，有效人声持续约 400 ms 可取消当前生成或播放，并保留上下文等待下一次停顿；generation 标识拦截迟到结果。立即停止取消生成、合成、播放缓冲与待处理判断，收到新完整转写、手动提交或手动要求回应后才能再次回应。
 - 播放状态等待缓冲耗尽再结束；某个输出断开时其他输出继续。来源错误提供具体提示，暂停再开始恢复连接。
 - 暂停终止当前会话；再次开始创建新会话。历史不自动注入新会话。
 
@@ -55,7 +56,9 @@ Tauri IPC，不提供本地 HTTP 服务。应用命令只向主窗口开放。�
 | `list_messages` | `sessionId` | 会话文字记录 |
 | `delete_session` | `sessionId` | 删除非活动会话与消息 |
 
-统一事件 `session-event`，使用 `type` 判别：`status`、`transcript`、`message`、`level`、`interrupted`、`error`。包含 session_id（消息事件位于 message 中），界面过滤过期会话。消息的 `visible` 控制当前会话是否展示助手文字；音频模式仍保存文字历史。凭据不会出现在事件或错误响应中。
+统一事件 `session-event`，使用 `type` 判别：`status`、`auto_reply`、`transcript`、`message`、`level`、`interrupted`、`error`。包含 session_id（消息事件位于 message 中），界面过滤过期会话。消息的 `visible` 控制当前会话是否展示助手文字；音频模式仍保存文字历史。凭据不会出现在事件或错误响应中。
+
+`auto_reply` 的结构为 `{type:"auto_reply",session_id,state}`。`state` 为 `listening`、`waiting_for_pause`、`waiting_for_interval`、`evaluating`、`skipped`、`interrupted` 或 `error`；只在状态变化时发送，用于解释自动判断过程，不写入会话消息或数据库。无需新增配置或迁移已有数据。
 
 外部文本 API 为方舟兼容的 `/chat/completions`，Bearer 鉴权；内部要求 JSON `{respond:boolean,text:string}`，以支持主动倾听。ASR 使用火山 v3 WebSocket 二进制协议，支持 gzip、序列号和确定语句去重；TTS 支持 v3 HTTP Chunked JSON / SSE。语音支持新版 `X-Api-Key`；旧版 ASR 使用 `X-Api-App-Key`，HTTP TTS 使用 `X-Api-App-Id`，配合 `X-Api-Access-Key`，两者请求标识分别为 Connect ID / Request ID。返回错误只展示状态码与操作提示。
 

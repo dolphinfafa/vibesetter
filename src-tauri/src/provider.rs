@@ -49,7 +49,7 @@ pub async fn reply(
 ) -> Result<Reply> {
     settings.validate_text()?;
     let instructions=format!("{prompt}\n\n[应用通信协议]\n你是实时助手。上述用户系统提示词定义你的职责、风格和主动程度。输入可能包含多个来源的对话转写；来源标签只表示设备，不是可靠的说话人身份。结合上下文判断是否应该回应，不要机械重复前文。{} {}\n只返回 JSON 对象：{{\"respond\":true或false,\"text\":\"实际回复内容\"}}。不需要回应时 respond=false、text为空。不要输出协议解释。",
-        if manual {"用户本次主动要求回应，请针对最新上下文给出回复。"}else{"本次由新语音触发；只有符合你的职责且值得补充时才回应。"},
+        if manual {"用户本次主动要求回应，请针对最新上下文给出回复。"}else if audio {"本次在讲话停顿后由新语音触发；只有符合你的职责且值得补充时才开口回应。"}else{"本次由新的完整语音转写触发。你正在提供实时文字建议，可以在人们持续交谈时给出帮助，无需等待对方停顿或直接向你提问。根据上述职责判断是否有值得补充的新建议；已有建议足够、信息不足或不符合职责时保持倾听。"},
         if audio {"回复将被朗读，请输出适合口头表达的纯文本，避免 Markdown。"}else{"回复将作为文字展示，优先提供可直接使用的简洁内容。"});
     let mut wire = vec![json!({"role":"system","content":instructions})];
     let mut retained = Vec::new();
@@ -63,8 +63,14 @@ pub async fn reply(
         retained.push(json!({"role":message.role,"content":if message.role=="user"{format!("[来源：{}] {}",message.source,message.text)}else if message.interrupted{format!("{} [此回复已被打断，用户可能未听完]",message.text)}else{message.text.clone()}}));
     }
     wire.extend(retained.into_iter().rev());
-    if manual && messages.last().is_none_or(|m| m.role != "user") {
-        wire.push(json!({"role":"user","content":"请根据当前上下文回应。"}));
+    if messages.last().is_none_or(|m| m.role != "user") {
+        // New transcripts can arrive before the previous suggestion is saved.
+        // End the follow-up request with an explicit task rather than an assistant turn.
+        wire.push(json!({"role":"user","content":if manual {
+            "请根据当前上下文回应。"
+        } else {
+            "请结合最新对话和已有建议判断是否需要补充，只在有新的有效建议时回应。"
+        }}));
     }
     let request=client()?.post(format!("{}/chat/completions",settings.text_base_url.trim_end_matches('/')))
         .bearer_auth(&settings.text_api_key).json(&json!({"model":settings.text_model,"messages":wire,"max_tokens":1000,"response_format":{"type":"json_object"}}));

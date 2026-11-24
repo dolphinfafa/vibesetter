@@ -61,9 +61,7 @@ test('delete removes an assistant after explicit confirmation', async ({ page })
   await page.screenshot({ path: '.artifacts/home.png', fullPage: true });
 });
 
-test('desktop IPC supports multiple routes, locks active devices and preserves Chinese IME composition', async ({
-  page,
-}) => {
+async function mockDesktop(page: import('@playwright/test').Page) {
   await page.addInitScript(() => {
     const runtime = window as unknown as Record<string, unknown>;
     const assistant = {
@@ -83,12 +81,23 @@ test('desktop IPC supports multiple routes, locks active devices and preserves C
       output_ids: [] as string[],
     };
     runtime.__test_submitted = [];
+    runtime.__test_commands = [];
+    const callbacks = new Map<number, (event: { payload: unknown }) => void>();
+    let callbackId = 0;
+    let listener = 0;
+    let sessionCount = 0;
+    runtime.__test_emit = (payload: unknown) => callbacks.get(listener)?.({ payload });
     runtime.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
     runtime.__TAURI_INTERNALS__ = {
-      transformCallback: () => 1,
+      transformCallback: (callback: (event: { payload: unknown }) => void) => {
+        callbacks.set(++callbackId, callback);
+        return callbackId;
+      },
       invoke: async (cmd: string, args: Record<string, unknown> = {}) => {
+        (runtime.__test_commands as string[]).push(cmd);
         switch (cmd) {
           case 'plugin:event|listen':
+            listener = args.handler as number;
             return 1;
           case 'plugin:event|unlisten':
             return null;
@@ -109,7 +118,16 @@ test('desktop IPC supports multiple routes, locks active devices and preserves C
             return null;
           case 'start_session':
             runtime.__test_start_config = args.config;
-            return { id: 'ipc-session', assistant_id: assistant.id, started_at: 1, ended_at: null };
+            return {
+              id: `ipc-session-${++sessionCount}`,
+              assistant_id: assistant.id,
+              started_at: 1,
+              ended_at: null,
+            };
+          case 'stop_session':
+          case 'trigger_reply':
+          case 'interrupt_reply':
+            return null;
           case 'list_messages':
             return [];
           case 'submit_text':
@@ -121,6 +139,12 @@ test('desktop IPC supports multiple routes, locks active devices and preserves C
       },
     };
   });
+}
+
+test('desktop IPC supports multiple routes, locks active devices and preserves Chinese IME composition', async ({
+  page,
+}) => {
+  await mockDesktop(page);
   await page.goto('/');
   await page.getByRole('button', { name: '开启对话' }).click();
   await page.getByRole('checkbox', { name: /测试麦克风/ }).click();
@@ -156,3 +180,54 @@ test('desktop IPC supports multiple routes, locks active devices and preserves C
     await page.evaluate(() => (window as unknown as Record<string, unknown>).__test_submitted),
   ).toEqual(['中文尚在输入']);
 });
+
+for (const speechOutput of [false, true]) {
+  test(`automatic reply status follows session events with ${speechOutput ? 'speech' : 'text'} output`, async ({
+    page,
+  }) => {
+    await mockDesktop(page);
+    await page.goto('/');
+    await page.getByRole('button', { name: '开启对话' }).click();
+    if (speechOutput) await page.getByRole('checkbox', { name: /测试耳机/ }).click();
+    await page.getByRole('button', { name: '开始会话' }).click();
+    const status = page.getByRole('status', { name: '自动回应状态' });
+    await expect(status).toContainText(speechOutput ? '停顿后自动回应' : '自动建议');
+    await expect(status).toContainText('等待新的完整语句');
+    const emit = async (state: string, sessionId = 'ipc-session-1') => {
+      await page.evaluate(
+        ({ state, sessionId }) => {
+          const runtime = window as unknown as { __test_emit: (payload: unknown) => void };
+          runtime.__test_emit({ type: 'auto_reply', session_id: sessionId, state });
+        },
+        { state, sessionId },
+      );
+    };
+    await emit('skipped', 'old-session');
+    await expect(status).toContainText('等待新的完整语句');
+    if (speechOutput) {
+      await emit('waiting_for_pause');
+      await expect(status).toContainText('等待讲话停顿后自动判断');
+    }
+    await emit('evaluating');
+    await expect(status).toContainText('正在判断是否需要回应');
+    await emit('skipped');
+    await expect(status).toContainText('暂不需要回应，继续倾听');
+    await expect(page.locator('.message-row')).toHaveCount(0);
+    await page.getByRole('button', { name: '回应一次' }).click();
+    await page.getByRole('button', { name: '立即停止' }).click();
+    const commands = await page.evaluate(
+      () => (window as unknown as { __test_commands: string[] }).__test_commands,
+    );
+    expect(commands).toContain('trigger_reply');
+    expect(commands).toContain('interrupt_reply');
+    await emit('interrupted');
+    await expect(status).toContainText('已停止回应');
+    await emit('error');
+    await expect(status).toContainText('本次判断或回应失败');
+    await page.getByRole('button', { name: '暂停会话' }).click();
+    await expect(status).toHaveCount(0);
+    await page.getByRole('button', { name: '开始会话' }).click();
+    await emit('skipped', 'ipc-session-1');
+    await expect(status).toContainText('等待新的完整语句');
+  });
+}

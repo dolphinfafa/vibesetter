@@ -350,6 +350,9 @@ impl Engine {
         let mut manual = false;
         let mut last_voice = Instant::now();
         let mut last_attempt = Instant::now() - Duration::from_secs(10);
+        let audio_reply = !config.output_ids.is_empty();
+        let mut decision = AutoReplyState::Listening;
+        let mut reported_decision = None;
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let emit = self.emit.clone();
         let status = |s: &str| {
@@ -361,6 +364,16 @@ impl Engine {
             }
         };
         loop {
+            if cancel.is_cancelled() {
+                break;
+            }
+            if reported_decision != Some(decision) {
+                emit(SessionEvent::AutoReply {
+                    session_id: session.id.clone(),
+                    state: decision,
+                });
+                reported_decision = Some(decision);
+            }
             let input = tokio::select! {_=cancel.cancelled()=>break,_=tick.tick()=>None,i=rx.recv()=>match i{Some(i)=>Some(i),None=>break}};
             let mut interrupt = false;
             match input {
@@ -395,11 +408,15 @@ impl Engine {
                 Some(Input::Interrupt) => {
                     pending = false;
                     manual = false;
+                    decision = AutoReplyState::Interrupted;
                     interrupt = true;
                 }
                 Some(Input::Voice) => {
                     last_voice = Instant::now();
-                    if running.is_some() {
+                    if audio_reply && running.is_some() {
+                        // Revisit this context after the speaker pauses, even if ASR
+                        // has not delivered another complete utterance yet.
+                        pending = true;
                         interrupt = true;
                     }
                 }
@@ -439,7 +456,7 @@ impl Engine {
                                 });
                                 pending = true;
                                 last_voice = Instant::now();
-                                interrupt = running.is_some();
+                                interrupt = audio_reply && running.is_some();
                             }
                             Err(e) => error("storage".into(), e),
                         }
@@ -462,9 +479,11 @@ impl Engine {
                         if let Err(e) = self.store.add_message(&m) {
                             error("storage".into(), e);
                             running = None;
+                            decision = AutoReplyState::Error;
                             status("listening");
                             continue;
                         }
+                        decision = AutoReplyState::Listening;
                         last_message = Some(m.id.clone());
                         emit(SessionEvent::Message {
                             message: m,
@@ -517,6 +536,7 @@ impl Engine {
                     }
                     Ok(_) => {
                         running = None;
+                        decision = AutoReplyState::Skipped;
                         status("listening");
                     }
                     Err(e) => {
@@ -524,6 +544,7 @@ impl Engine {
                             error("text".into(), e);
                         }
                         running = None;
+                        decision = AutoReplyState::Error;
                         status("listening");
                     }
                 },
@@ -533,6 +554,9 @@ impl Engine {
                 }) if g == generation => {
                     if let Err(e) = result {
                         error("tts".into(), e);
+                        decision = AutoReplyState::Error;
+                    } else {
+                        decision = AutoReplyState::Listening;
                     }
                     running = None;
                     last_message = None;
@@ -557,19 +581,23 @@ impl Engine {
                 }
                 status("listening");
             }
-            if pending
-                && running.is_none()
-                && (manual
-                    || (last_voice.elapsed() >= Duration::from_millis(1200)
-                        && last_attempt.elapsed() >= Duration::from_secs(4)))
-            {
+            if !pending || running.is_some() {
+                continue;
+            }
+            if !manual && audio_reply && last_voice.elapsed() < Duration::from_millis(1200) {
+                decision = AutoReplyState::WaitingForPause;
+            } else if !manual && last_attempt.elapsed() < Duration::from_secs(4) {
+                decision = AutoReplyState::WaitingForInterval;
+            } else {
                 pending = false;
+                let forced = std::mem::take(&mut manual);
                 generation += 1;
                 last_attempt = Instant::now();
                 let prompt = match self.store.assistant(&session.assistant_id) {
                     Ok(a) => a.prompt,
                     Err(e) => {
                         error("assistant".into(), e);
+                        decision = AutoReplyState::Error;
                         continue;
                     }
                 };
@@ -577,20 +605,20 @@ impl Engine {
                     Ok(m) => m,
                     Err(e) => {
                         error("storage".into(), e);
+                        decision = AutoReplyState::Error;
                         continue;
                     }
                 };
                 let c = cancel.child_token();
                 running = Some(c.clone());
+                decision = AutoReplyState::Evaluating;
                 status("thinking");
                 let s = settings.clone();
                 let done = tx.clone();
                 let g = generation;
-                let audio = !config.output_ids.is_empty();
-                let forced = manual;
-                manual = false;
                 tokio::spawn(async move {
-                    let result = provider::reply(&s, &prompt, &messages, forced, audio, &c).await;
+                    let result =
+                        provider::reply(&s, &prompt, &messages, forced, audio_reply, &c).await;
                     let _ = done
                         .send(Input::Ready {
                             generation: g,
@@ -608,3 +636,6 @@ impl Engine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

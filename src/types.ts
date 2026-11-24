@@ -55,8 +55,17 @@ export type SettingsPatch = Partial<
   speech_access_token?: string;
   speech_api_key?: string;
 };
+export type AutoReplyState =
+  | 'listening'
+  | 'waiting_for_pause'
+  | 'waiting_for_interval'
+  | 'evaluating'
+  | 'skipped'
+  | 'interrupted'
+  | 'error';
 export type SessionEvent =
   | { type: 'status'; session_id: string; status: string }
+  | { type: 'auto_reply'; session_id: string; state: AutoReplyState }
   | { type: 'transcript'; session_id: string; source: string; text: string; is_final: boolean }
   | { type: 'message'; message: Message; visible: boolean }
   | { type: 'level'; session_id: string; source: string; value: number }

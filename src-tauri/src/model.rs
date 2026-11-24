@@ -109,12 +109,28 @@ pub struct Message {
     pub interrupted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoReplyState {
+    Listening,
+    WaitingForPause,
+    WaitingForInterval,
+    Evaluating,
+    Skipped,
+    Interrupted,
+    Error,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
     Status {
         session_id: String,
         status: String,
+    },
+    AutoReply {
+        session_id: String,
+        state: AutoReplyState,
     },
     Transcript {
         session_id: String,

@@ -40,6 +40,7 @@ import {
   defaultSettings,
   type Assistant,
   type AudioDevice,
+  type AutoReplyState,
   type Message,
   type PublicSettings,
   type Session,
@@ -50,6 +51,15 @@ import {
 
 type Page = 'home' | 'assistant' | 'settings';
 const colors = ['violet', 'blue', 'teal', 'rose', 'amber'];
+const autoReplyLabels: Record<AutoReplyState, string> = {
+  listening: '等待新的完整语句',
+  waiting_for_pause: '等待讲话停顿后自动判断',
+  waiting_for_interval: '已收到新内容，稍后自动判断',
+  evaluating: '正在判断是否需要回应',
+  skipped: '暂不需要回应，继续倾听',
+  interrupted: '已停止回应，等待新输入或手动回应',
+  error: '本次判断或回应失败，可手动重试或等待新输入',
+};
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const time = (timestamp: number) =>
   new Date(timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
@@ -110,6 +120,7 @@ export default function App() {
   const [editor, setEditor] = useState<Assistant | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [status, setStatus] = useState('stopped');
+  const [autoReply, setAutoReply] = useState<AutoReplyState>('listening');
   const [messages, setMessages] = useState<(Message & { visible?: boolean })[]>([]);
   const [partials, setPartials] = useState<Record<string, string>>({});
   const [levels, setLevels] = useState<Record<string, number>>({});
@@ -154,8 +165,10 @@ export default function App() {
           setSession(null);
           setPartials({});
           setLevels({});
+          setAutoReply('listening');
         }
-      } else if (event.type === 'message')
+      } else if (event.type === 'auto_reply') setAutoReply(event.state);
+      else if (event.type === 'message')
         setMessages((previous) =>
           previous.some((m) => m.id === event.message.id)
             ? previous
@@ -213,6 +226,7 @@ export default function App() {
     currentSession.current = null;
     setSession(null);
     setStatus('stopped');
+    setAutoReply('listening');
     setPartials({});
     setLevels({});
   }
@@ -247,6 +261,7 @@ export default function App() {
       currentSession.current = s.id;
       setSession(s);
       setStatus('listening');
+      setAutoReply('listening');
       setMessages([]);
       setPartials({});
       setViewingHistory(false);
@@ -755,13 +770,24 @@ export default function App() {
               </div>
               <div className="composer-area">
                 {running && (
+                  <div className="auto-reply-status" role="status" aria-label="自动回应状态">
+                    <strong>{route.output_ids.length ? '停顿后自动回应' : '自动建议'}</strong>
+                    <span>
+                      {status === 'speaking' ? '正在语音回应' : autoReplyLabels[autoReply]}
+                    </span>
+                  </div>
+                )}
+                {running && (
                   <div className="live-controls">
                     <span>
                       <span className="live-dot" />
                       {activeStatus}
                     </span>
                     <div>
-                      <button onClick={() => command('trigger_reply').catch(fail)}>
+                      <button
+                        title="手动要求立即回应，无需等待自动判断"
+                        onClick={() => command('trigger_reply').catch(fail)}
+                      >
                         <Sparkles size={13} />
                         回应一次
                       </button>

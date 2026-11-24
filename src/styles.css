@@ -1484,6 +1484,19 @@ p {
   color: #c6b7cf;
   margin-top: 10px;
 }
+.auto-reply-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #857392;
+}
+.auto-reply-status strong {
+  font-weight: 500;
+  color: #785cc7;
+}
 .live-controls {
   display: flex;
   justify-content: space-between;
