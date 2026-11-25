@@ -7,6 +7,9 @@ use std::{
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+mod text_context;
+use text_context::TextContext;
+
 pub type Emit = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 pub type AudioError = Arc<dyn Fn(String, String) + Send + Sync>;
 pub struct AudioFrame {
@@ -351,9 +354,16 @@ impl Engine {
         let mut last_voice = Instant::now();
         let mut last_attempt = Instant::now() - Duration::from_secs(10);
         let audio_reply = !config.output_ids.is_empty();
+        let mut text_context = TextContext::default();
+        let mut text_changed = false;
         let mut decision = AutoReplyState::Listening;
         let mut reported_decision = None;
         let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut text_tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(4),
+            Duration::from_secs(4),
+        );
+        text_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let emit = self.emit.clone();
         let status = |s: &str| {
             if !cancel.is_cancelled() {
@@ -374,7 +384,12 @@ impl Engine {
                 });
                 reported_decision = Some(decision);
             }
-            let input = tokio::select! {_=cancel.cancelled()=>break,_=tick.tick()=>None,i=rx.recv()=>match i{Some(i)=>Some(i),None=>break}};
+            let (input, text_due) = tokio::select! {
+                _=cancel.cancelled()=>break,
+                _=tick.tick()=>(None, false),
+                _=text_tick.tick(), if !audio_reply=>(None, true),
+                i=rx.recv()=>match i { Some(i)=>(Some(i), false), None=>break },
+            };
             let mut interrupt = false;
             match input {
                 Some(Input::Text(text)) => {
@@ -389,6 +404,10 @@ impl Engine {
                     };
                     match self.store.add_message(&m) {
                         Ok(()) => {
+                            if !audio_reply {
+                                text_context.confirm(&m.source, &m.text);
+                                text_changed = text_context.changed();
+                            }
                             emit(SessionEvent::Message {
                                 message: m,
                                 visible: true,
@@ -408,6 +427,8 @@ impl Engine {
                 Some(Input::Interrupt) => {
                     pending = false;
                     manual = false;
+                    text_context.mark_handled();
+                    text_changed = false;
                     decision = AutoReplyState::Interrupted;
                     interrupt = true;
                 }
@@ -426,6 +447,10 @@ impl Engine {
                     is_final,
                 }) => {
                     if !is_final {
+                        if !audio_reply {
+                            text_context.partial(&source, &text);
+                            text_changed = text_context.changed();
+                        }
                         emit(SessionEvent::Transcript {
                             session_id: session.id.clone(),
                             source,
@@ -450,11 +475,15 @@ impl Engine {
                         });
                         match self.store.add_message(&m) {
                             Ok(()) => {
+                                if !audio_reply {
+                                    text_context.confirm(&m.source, &m.text);
+                                    text_changed = text_context.changed();
+                                }
                                 emit(SessionEvent::Message {
                                     message: m,
                                     visible: true,
                                 });
-                                pending = true;
+                                pending = audio_reply;
                                 last_voice = Instant::now();
                                 interrupt = audio_reply && running.is_some();
                             }
@@ -581,16 +610,37 @@ impl Engine {
                 }
                 status("listening");
             }
-            if !pending || running.is_some() {
+            if running.is_some() {
+                continue;
+            }
+            if !audio_reply && !manual {
+                if !text_changed {
+                    if decision == AutoReplyState::WaitingForInterval {
+                        decision = AutoReplyState::Listening;
+                    }
+                    continue;
+                }
+                if !text_due {
+                    decision = AutoReplyState::WaitingForInterval;
+                    continue;
+                }
+            } else if !pending {
                 continue;
             }
             if !manual && audio_reply && last_voice.elapsed() < Duration::from_millis(1200) {
                 decision = AutoReplyState::WaitingForPause;
-            } else if !manual && last_attempt.elapsed() < Duration::from_secs(4) {
+            } else if !manual && audio_reply && last_attempt.elapsed() < Duration::from_secs(4) {
                 decision = AutoReplyState::WaitingForInterval;
             } else {
                 pending = false;
                 let forced = std::mem::take(&mut manual);
+                if !audio_reply {
+                    // Includes skipped, failed and manually stopped contexts:
+                    // only a different effective input can trigger another attempt.
+                    text_context.mark_handled();
+                    text_changed = false;
+                    text_tick.reset_after(Duration::from_secs(4));
+                }
                 generation += 1;
                 last_attempt = Instant::now();
                 let prompt = match self.store.assistant(&session.assistant_id) {
@@ -601,7 +651,7 @@ impl Engine {
                         continue;
                     }
                 };
-                let messages = match self.store.messages(&session.id) {
+                let mut messages = match self.store.messages(&session.id) {
                     Ok(m) => m,
                     Err(e) => {
                         error("storage".into(), e);
@@ -609,6 +659,9 @@ impl Engine {
                         continue;
                     }
                 };
+                if !audio_reply {
+                    text_context.append_drafts(&mut messages, &session.id);
+                }
                 let c = cancel.child_token();
                 running = Some(c.clone());
                 decision = AutoReplyState::Evaluating;

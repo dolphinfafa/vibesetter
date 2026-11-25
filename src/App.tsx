@@ -52,7 +52,7 @@ import {
 type Page = 'home' | 'assistant' | 'settings';
 const colors = ['violet', 'blue', 'teal', 'rose', 'amber'];
 const autoReplyLabels: Record<AutoReplyState, string> = {
-  listening: '等待新的完整语句',
+  listening: '等待新的识别内容',
   waiting_for_pause: '等待讲话停顿后自动判断',
   waiting_for_interval: '已收到新内容，稍后自动判断',
   evaluating: '正在判断是否需要回应',
@@ -771,7 +771,9 @@ export default function App() {
               <div className="composer-area">
                 {running && (
                   <div className="auto-reply-status" role="status" aria-label="自动回应状态">
-                    <strong>{route.output_ids.length ? '停顿后自动回应' : '自动建议'}</strong>
+                    <strong>
+                      {route.output_ids.length ? '停顿后自动回应' : '每 4 秒自动分析'}
+                    </strong>
                     <span>
                       {status === 'speaking' ? '正在语音回应' : autoReplyLabels[autoReply]}
                     </span>

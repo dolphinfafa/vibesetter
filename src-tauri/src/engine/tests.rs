@@ -207,9 +207,13 @@ impl Fixture {
     }
 
     async fn transcript(&self, text: &str, is_final: bool) {
+        self.transcript_from("test-mic", text, is_final).await;
+    }
+
+    async fn transcript_from(&self, source: &str, text: &str, is_final: bool) {
         self.engine
             .send(Input::Transcript {
-                source: "test-mic".into(),
+                source: source.into(),
                 text: text.into(),
                 is_final,
             })
@@ -311,7 +315,7 @@ async fn no_repeated_decision_without_new_input(failure: bool) {
     .await;
     assert_eq!(f.messages().len(), 1);
     f.engine.send(Input::Voice).await.unwrap();
-    f.transcript("没有确定的新内容", false).await;
+    f.transcript("", false).await;
     service.no_request(Duration::from_millis(4200)).await;
     f.transcript("现在出现了值得回应的新问题", true).await;
     service.request().await.complete(true);
@@ -322,7 +326,7 @@ async fn no_repeated_decision_without_new_input(failure: bool) {
 }
 
 #[tokio::test]
-async fn skipped_decisions_wait_for_new_complete_transcripts() {
+async fn skipped_decisions_wait_for_changed_input() {
     no_repeated_decision_without_new_input(false).await;
 }
 
@@ -424,4 +428,115 @@ async fn stopping_session_discards_automatic_reply() {
     service.no_request(Duration::from_millis(200)).await;
     assert_eq!(f.messages().len(), 1);
     assert!(f.engine.active_session().await.is_none());
+}
+
+#[tokio::test]
+async fn interim_only_speech_is_analyzed_periodically_and_corrections_retrigger() {
+    let mut service = Service::new().await;
+    let mut f = Fixture::new(&service, false, true).await;
+    let voice = f.continuous_voice();
+    let started = Instant::now();
+    f.transcript("我想聊北京的生活", false).await;
+    f.decision(AutoReplyState::WaitingForInterval).await;
+    service.no_request(Duration::from_millis(1500)).await;
+    let first = service.request().await;
+    assert!(first.at.duration_since(started) >= Duration::from_millis(3900));
+    assert!(first.wire.contains("我想聊北京的生活"));
+    assert!(first.wire.contains("临时识别，尚未确认，可能修正"));
+    assert!(first.wire.contains("每 4 秒的定时分析"));
+    assert!(f.messages().is_empty(), "drafts must not be persisted");
+    first.complete(true);
+    f.wait(|e| matches!(e, SessionEvent::Message { message, .. } if message.role == "assistant"))
+        .await;
+    f.transcript("我想聊北京的生活", false).await;
+    f.transcript("", false).await;
+    service.no_request(Duration::from_millis(4200)).await;
+    assert_eq!(f.messages().len(), 1);
+    f.transcript("我想聊上海的生活", false).await;
+    let revised = service.request().await;
+    assert!(revised.wire.contains("我想聊上海的生活"));
+    assert!(!revised.wire.contains("我想聊北京的生活"));
+    revised.complete(false);
+    f.decision(AutoReplyState::Skipped).await;
+    f.transcript("我想聊上海的生活", true).await;
+    f.transcript("", false).await;
+    service.no_request(Duration::from_millis(4200)).await;
+    assert_eq!(f.messages().len(), 2);
+    voice.abort();
+    f.engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn slow_text_generation_skips_busy_ticks_and_uses_the_latest_sources() {
+    let mut service = Service::new().await;
+    let mut f = Fixture::new(&service, false, true).await;
+    f.transcript("麦克风的原始片段", false).await;
+    let first = service.request().await;
+    let first_at = first.at;
+    f.transcript("麦克风最新片段", false).await;
+    f.transcript_from("system", "电脑音频同时说话", false).await;
+    service.no_request(Duration::from_millis(4400)).await;
+    first.complete(true);
+    f.wait(|e| matches!(e, SessionEvent::Message { message, .. } if message.role == "assistant"))
+        .await;
+    service.no_request(Duration::from_millis(500)).await;
+    let next = service.request().await;
+    assert!(next.at.duration_since(first_at) >= Duration::from_millis(7900));
+    assert!(next.wire.contains("麦克风最新片段"));
+    assert!(next.wire.contains("电脑音频同时说话"));
+    assert!(!next.wire.contains("麦克风的原始片段"));
+    next.complete(false);
+    f.decision(AutoReplyState::Skipped).await;
+    f.transcript("麦克风最新片段", true).await;
+    f.transcript_from("system", "电脑音频同时说话", true).await;
+    service.no_request(Duration::from_millis(4200)).await;
+    assert_eq!(f.messages().len(), 3);
+    f.engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stopping_discards_pending_drafts_until_their_effective_content_changes() {
+    let mut service = Service::new().await;
+    let mut f = Fixture::new(&service, false, true).await;
+    f.transcript("临时内容甲", false).await;
+    let delayed = service.request().await;
+    f.transcript("临时内容乙", false).await;
+    f.wait(|e| matches!(e, SessionEvent::Transcript { text, .. } if text == "临时内容乙"))
+        .await;
+    f.engine.interrupt().await.unwrap();
+    f.decision(AutoReplyState::Interrupted).await;
+    delayed.complete(true);
+    f.transcript("临时内容乙", false).await;
+    f.transcript("临时内容乙", true).await;
+    f.transcript("", false).await;
+    service.no_request(Duration::from_millis(4200)).await;
+    assert_eq!(f.messages().len(), 1);
+    f.transcript("新的临时内容丙", false).await;
+    let resumed = service.request().await;
+    assert!(resumed.wire.contains("新的临时内容丙"));
+    resumed.complete(true);
+    f.wait(|e| matches!(e, SessionEvent::Message { message, .. } if message.role == "assistant"))
+        .await;
+    f.engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manual_reply_uses_current_drafts_without_waiting_for_the_timer() {
+    let mut service = Service::new().await;
+    let mut f = Fixture::new(&service, false, true).await;
+    f.transcript("尚未断句的手动回应上下文", false).await;
+    f.engine.trigger().await.unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(2), service.request())
+        .await
+        .unwrap();
+    assert!(request.wire.contains("用户本次主动要求回应"));
+    assert!(request.wire.contains("尚未断句的手动回应上下文"));
+    assert!(request.wire.contains("尚未确认，可能修正"));
+    assert!(f.messages().is_empty());
+    request.complete(true);
+    f.wait(|e| matches!(e, SessionEvent::Message { message, .. } if message.role == "assistant"))
+        .await;
+    service.no_request(Duration::from_millis(4200)).await;
+    assert_eq!(f.messages().len(), 1);
+    f.engine.stop().await.unwrap();
 }

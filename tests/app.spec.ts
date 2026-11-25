@@ -191,8 +191,8 @@ for (const speechOutput of [false, true]) {
     if (speechOutput) await page.getByRole('checkbox', { name: /测试耳机/ }).click();
     await page.getByRole('button', { name: '开始会话' }).click();
     const status = page.getByRole('status', { name: '自动回应状态' });
-    await expect(status).toContainText(speechOutput ? '停顿后自动回应' : '自动建议');
-    await expect(status).toContainText('等待新的完整语句');
+    await expect(status).toContainText(speechOutput ? '停顿后自动回应' : '每 4 秒自动分析');
+    await expect(status).toContainText('等待新的识别内容');
     const emit = async (state: string, sessionId = 'ipc-session-1') => {
       await page.evaluate(
         ({ state, sessionId }) => {
@@ -203,7 +203,7 @@ for (const speechOutput of [false, true]) {
       );
     };
     await emit('skipped', 'old-session');
-    await expect(status).toContainText('等待新的完整语句');
+    await expect(status).toContainText('等待新的识别内容');
     if (speechOutput) {
       await emit('waiting_for_pause');
       await expect(status).toContainText('等待讲话停顿后自动判断');
@@ -228,6 +228,6 @@ for (const speechOutput of [false, true]) {
     await expect(status).toHaveCount(0);
     await page.getByRole('button', { name: '开始会话' }).click();
     await emit('skipped', 'ipc-session-1');
-    await expect(status).toContainText('等待新的完整语句');
+    await expect(status).toContainText('等待新的识别内容');
   });
 }
